@@ -14,6 +14,21 @@ RUN_DOCKER_TESTS=1 go test -race -count=1 -v ./integration
 go run ./cmd/demo
 ```
 
+## CI/CD and published image
+
+GitHub Actions runs the Go tests, `go vet`, the Docker build and Docker integration tests on pull requests and pushes to `main`. A successful push of the current `main` commit publishes the image to GHCR; superseded commits are not published.
+
+The image is `ghcr.io/cyberblock-spda/game-streamer`. Each published image has a numerical `main-<revision>` tag for deployment, a convenient `sha-<short-commit-sha>` tag, and a unique `sha-<full-commit-sha>-<revision>` tag for immutable traceability. The revision is formed from the GitHub Actions run ID and its zero-padded run attempt, so reruns get a distinct number and workflow edits do not reset numbering. Failed, canceled or superseded runs can leave gaps.
+
+For example:
+
+```sh
+docker pull ghcr.io/cyberblock-spda/game-streamer:main-123456789000001
+docker pull ghcr.io/cyberblock-spda/game-streamer:sha-a81c92f
+```
+
+Use the numerical `main-<revision>` reference in an Agones Fleet; Flux Image Automation and Fleet configuration belong to the separate infrastructure repository. The runtime container keeps TCP 7000 for the agent HTTP endpoint and UDP 8000 for WebRTC media. Agones is responsible for allocating externally reachable ports.
+
 When the agent logs `state=READY`, open **http://127.0.0.1:7070** and click **Play**. The demo starts its own loopback-only Docker container and creates an ephemeral Ed25519 key. It needs TCP 7070 and 7000 and UDP 8000. For occupied ports, run `go run ./cmd/demo -port 7071 -signaling 7001 -webrtc 8001`.
 
 1. Press **Escape** to open the game menu and press it again to resume.

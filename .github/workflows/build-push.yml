@@ -1,0 +1,125 @@
+name: Build and publish game-streamer
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: game-streamer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate source and container
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.3'
+          cache: true
+
+      - name: Run Go tests
+        run: go test -race ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build container for integration tests
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: game-streamer:ci
+          cache-from: type=gha,scope=game-streamer
+          cache-to: type=gha,mode=max,scope=game-streamer
+
+      - name: Run Docker integration tests
+        env:
+          RUN_DOCKER_TESTS: '1'
+          GAME_IMAGE: game-streamer:ci
+        run: go test -race -count=1 -v ./integration
+
+  publish:
+    name: Publish image to GHCR
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Skip superseded main commits
+        id: current-main
+        run: |
+          git fetch --no-tags origin main
+          if [ "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping publication because a newer commit is now on main."
+          fi
+
+      - name: Create numerical revision
+        if: steps.current-main.outputs.publish == 'true'
+        id: revision
+        shell: bash
+        run: |
+          printf -v number '%s%06d' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.current-main.outputs.publish == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: steps.current-main.outputs.publish == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        if: steps.current-main.outputs.publish == 'true'
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/cyberblock-spda/game-streamer
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=main-${{ steps.revision.outputs.number }}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=sha-${{ github.sha }}-${{ steps.revision.outputs.number }}
+          labels: |
+            org.opencontainers.image.version=main-${{ steps.revision.outputs.number }}
+
+      - name: Build and push image
+        if: steps.current-main.outputs.publish == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=game-streamer
+          cache-to: type=gha,mode=max,scope=game-streamer
+          sbom: true
+          provenance: mode=max
