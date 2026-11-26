@@ -1,0 +1,57 @@
+apiVersion: agones.dev/v1
+kind: Fleet
+metadata:
+  name: doom
+  namespace: team-1
+spec:
+  replicas: 1
+  template:
+    spec:
+      container: game
+      ports:
+        - name: signaling
+          protocol: TCP
+          portPolicy: Passthrough
+        - name: webrtc
+          protocol: UDP
+          portPolicy: Passthrough
+      health:
+        initialDelaySeconds: 65
+        periodSeconds: 5
+        failureThreshold: 3
+      template:
+        spec:
+          terminationGracePeriodSeconds: 20
+          containers:
+            - name: game
+              image: game-streamer:local
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 10001
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: SESSION_PUBLIC_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: game-streamer-auth
+                      key: public-key-base64
+                - name: ALLOWED_ORIGIN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: game-streamer-web
+                      key: origin
+                - name: TLS_CERT_FILE
+                  value: /tls/tls.crt
+                - name: TLS_KEY_FILE
+                  value: /tls/tls.key
+              volumeMounts:
+                - name: signaling-tls
+                  mountPath: /tls
+                  readOnly: true
+          volumes:
+            - name: signaling-tls
+              secret:
+                secretName: game-streamer-tls
