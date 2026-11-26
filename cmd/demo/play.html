@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Doom session check</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui;background:#171717;color:#eee}main{max-width:54rem;margin:3rem auto;padding:0 1rem}video{width:100%;aspect-ratio:426/240;background:#050505;image-rendering:pixelated}button{font:inherit;padding:.35rem 1.3rem}output{margin-left:1rem}kbd{background:#353535;padding:0 .25rem}
+</style>
+<main><h1>Doom session check</h1><video autoplay muted playsinline tabindex="0" aria-label="Doom live video"></video>
+<p><button id="play">Play</button><output id="status" aria-live="polite">Ready to connect</output></p>
+<p>Use the arrow keys to move and turn, <kbd>Ctrl</kbd> to fire, and <kbd>Space</kbd> to open doors. Move or click the mouse over the game. Closing the page ends the session.</p></main>
+<script>
+const video = document.querySelector('video');
+const play = document.querySelector('#play');
+const status = document.querySelector('#status');
+const keys = new Set(), buttons = new Set();
+const buttonNames = ['left','middle','right'];
+let dc, seq = 0, timer;
+function send(type, fields = {}) {
+  if (dc?.readyState === 'open') dc.send(JSON.stringify({type, seq:seq++, ...fields}));
+}
+function clearInput() { keys.clear(); buttons.clear(); send('input_reset'); }
+window.addEventListener('blur', () => {clearInput(); send('focus',{focused:false});});
+window.addEventListener('focus', () => send('focus',{focused:true}));
+window.addEventListener('keydown', e => {
+  if (dc?.readyState !== 'open' || e.metaKey || e.code === 'Tab') return;
+  e.preventDefault(); if (!e.repeat) {keys.add(e.code); send('key',{code:e.code,action:'down'});}
+});
+window.addEventListener('keyup', e => {if (keys.delete(e.code)) send('key',{code:e.code,action:'up'});});
+video.addEventListener('mousemove', e => send('mouse_move',{dx:Math.max(-1000,Math.min(1000,e.movementX)),dy:Math.max(-1000,Math.min(1000,e.movementY))}));
+video.addEventListener('mousedown', e => {const button=buttonNames[e.button]; if(button){buttons.add(button);send('mouse_button',{button,action:'down'});}});
+window.addEventListener('mouseup', e => {const button=buttonNames[e.button]; if(buttons.delete(button)) send('mouse_button',{button,action:'up'});});
+video.addEventListener('contextmenu', e => e.preventDefault());
+play.onclick = async () => {
+  play.disabled=true; status.textContent='Connecting…';
+  const pc=new RTCPeerConnection(), ws=new WebSocket({{.WS}});
+  const pending=[], outgoing=[]; let answered=false, offered=false, localEnd=false, remoteEnd=false;
+  const transmit = m => ws.send(JSON.stringify(m));
+  const done = () => {
+    if(localEnd && remoteEnd && pc.connectionState==='connected' && ws.readyState===WebSocket.OPEN) ws.close(1000);
+  };
+  const fail = message => {status.textContent=message;clearInterval(timer);pc.close();ws.close();};
+  pc.addTransceiver('video',{direction:'recvonly'});
+  dc=pc.createDataChannel('game-input',{ordered:false,maxRetransmits:0});
+  dc.onopen=()=>{video.focus();status.textContent='Playing';timer=setInterval(()=>send('input_state',{focused:document.hasFocus(),pressedKeys:[...keys],pressedButtons:[...buttons]}),150);};
+  dc.onclose=()=>{clearInterval(timer);status.textContent='Session ended';};
+  pc.ontrack=e=>{video.srcObject=new MediaStream([e.track]);};
+  pc.onconnectionstatechange=()=>{done();if(['disconnected','failed'].includes(pc.connectionState))fail('WebRTC disconnected');};
+  pc.onicecandidate=e=>{
+    const msg=e.candidate?{type:'ice-candidate',candidate:e.candidate.toJSON()}:{type:'ice-complete'};
+    if(offered)transmit(msg);else outgoing.push(msg);
+    if(!e.candidate){localEnd=true;done();}
+  };
+  ws.onopen=()=>transmit({type:'authenticate',token:{{.Token}}});
+  ws.onerror=()=>fail('Signaling unavailable. Check that the agent is READY, then reload.');
+  // Browser event dispatch does not await asynchronous message handlers.
+  let messages=Promise.resolve();
+  ws.onmessage=e=>{messages=messages.then(async()=>{
+    const m=JSON.parse(e.data);
+    switch(m.type){
+      case 'authenticated': {
+        const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+        transmit({type:'offer',sdp:offer.sdp});offered=true;outgoing.splice(0).forEach(transmit);break;
+      }
+      case 'answer':
+        await pc.setRemoteDescription({type:'answer',sdp:m.sdp});answered=true;
+        for(const c of pending.splice(0))await pc.addIceCandidate(c);break;
+      case 'ice-candidate': if(answered)await pc.addIceCandidate(m.candidate);else pending.push(m.candidate);break;
+      case 'ice-complete': if(answered)await pc.addIceCandidate(null);else pending.push(null);remoteEnd=true;done();break;
+      case 'error': fail(m.code+' — '+m.message);break;
+    }
+  }).catch(err=>fail(err.message));};
+  window.addEventListener('pagehide',()=>{clearInput();dc.close();pc.close();ws.close();},{once:true});
+};
+</script></html>
